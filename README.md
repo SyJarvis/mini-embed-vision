@@ -12,7 +12,7 @@ license: apache-2.0
 
 轻量级中文图文统一嵌入模型（Multimodal Embedding Model for Chinese）
 
-[中文](./README.md) | [English](./README_en.md)
+中文 | [English](./README_en.md)
 
 </div>
 
