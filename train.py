@@ -93,7 +93,7 @@ def main():
     # === 配置 ===
     TEXT_MODEL = "BAAI/bge-base-zh-v1.5"
     VISION_MODEL = "openai/clip-vit-base-patch32"
-    ROOT_DIR = "/root/research/miniembedding/data/coco128"
+    ROOT_DIR = "data/coco128"
     EMBED_DIM = 768
     BATCH_SIZE = 64
     EPOCHS = 100
