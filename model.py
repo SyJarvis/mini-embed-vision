@@ -36,6 +36,7 @@ import torch.nn.functional as F
 from transformers import AutoModel, CLIPVisionModel, PreTrainedModel
 from transformers.modeling_outputs import ModelOutput
 from typing import Optional, Tuple, Union
+import os
 
 try:
     from peft import LoraConfig, get_peft_model, TaskType
@@ -52,12 +53,42 @@ def _concat_all_gather(tensor):
 
 class MiniEmbedVisionModel(PreTrainedModel):
     config_class = MiniEmbedVisionConfig
+    base_model_prefix = "miniembed_vision"
 
     def __init__(self, config):
         super().__init__(config)
+        # 解析 text_model_name
+        text_model_path = config.text_model_name
+        if text_model_path.startswith("./") or os.path.isdir(text_model_path):
+            # 转为绝对路径
+            if hasattr(config, '_name_or_path') and config._name_or_path:
+                base_dir = config._name_or_path
+                resolved_text_path = os.path.abspath(os.path.join(base_dir, text_model_path))
+            else:
+                resolved_text_path = os.path.abspath(text_model_path)
+            # 安全检查
+            if not os.path.exists(resolved_text_path):
+                raise FileNotFoundError(f"Text encoder path not found: {resolved_text_path}")
+        else:
+            # 视为hf路径
+            resolved_text_path = text_model_path
+        # 解析 vision_model_name
+        vision_model_path = config.vision_model_name
+        if vision_model_path.startswith("./") or os.path.isdir(vision_model_path):
+            resolved_vision_path = vision_model_path
+            if hasattr(config, '_name_or_path') and config._name_or_path:
+                base_dir = config._name_or_path
+                resolved_vision_path = os.path.abspath(os.path.join(base_dir, vision_model_path))
+            else:
+                resolved_vision_path = os.path.abspath(vision_model_path)
+            # 安全检查
+            if not os.path.exists(resolved_vision_path):
+                raise FileNotFoundError(f"Vision encoder path not found: {resolved_vision_path}")
+        else:
+            resolved_vision_path = vision_model_path
         
         # 文本编码器
-        self.text_encoder = AutoModel.from_pretrained(config.text_model_name)
+        self.text_encoder = AutoModel.from_pretrained(resolved_text_path)
         text_hidden = self.text_encoder.config.hidden_size
         # 若冻结文本编码器 freeze_text
         if config.freeze_text:
@@ -66,7 +97,7 @@ class MiniEmbedVisionModel(PreTrainedModel):
             self.text_encoder.eval()
         
         # 视觉编码器
-        self.vision_encoder = CLIPVisionModel.from_pretrained(config.vision_model_name)
+        self.vision_encoder = CLIPVisionModel.from_pretrained(resolved_vision_path)
         vis_hidden = self.vision_encoder.config.hidden_size
 
         # lora config
@@ -94,14 +125,14 @@ class MiniEmbedVisionModel(PreTrainedModel):
         sum_mask = torch.clamp(sum_mask, min=1e-9)
         return sum_emb / sum_mask
 
-    def encode_text(self, input_ids, attention_mask):
+    def encode_text(self, input_ids, attention_mask, **kwargs):
         with torch.no_grad() if not any(p.requires_grad for p in self.text_encoder.parameters()) else torch.enable_grad():
             outputs = self.text_encoder(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
             pooled = self._bge_pool(outputs.last_hidden_state, attention_mask)
         emb = self.text_proj(pooled)
         return F.normalize(emb, p=2, dim=-1)
 
-    def encode_image(self, pixel_values):
+    def encode_image(self, pixel_values, **kwargs):
         outputs = self.vision_encoder(pixel_values=pixel_values, return_dict=True)
         cls_feat = outputs.last_hidden_state[:, 0]
         emb = self.vision_proj(cls_feat)
@@ -115,6 +146,7 @@ class MiniEmbedVisionModel(PreTrainedModel):
         return_loss: bool = False,
         gather_for_ddp: bool = True,
         labels: Optional[torch.Tensor] = None,  # reserved for supervised contrastive
+        **kwargs
     ) -> Union[ModelOutput, Tuple[torch.Tensor, ...]]:
         """
         模拟 Nomic 风格：既支持文本也支持图像
@@ -188,3 +220,6 @@ class MiniEmbedVisionModel(PreTrainedModel):
             text_embeds=text_emb,
             image_embeds=image_emb,
         )
+
+MiniEmbedVisionConfig.register_for_auto_class()
+MiniEmbedVisionModel.register_for_auto_class("AutoModel")
