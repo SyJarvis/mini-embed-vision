@@ -1,0 +1,18 @@
+# Model weights
+mini-embed-vision-v1.0/
+*.safetensors
+*.bin
+*.pth
+*.ckpt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+
+# OS
+.DS_Store
