@@ -1,10 +1,78 @@
 import os
+import random
 from PIL import Image
 import torch
 from torch.utils.data import Dataset
-from transformers import AutoTokenizer, CLIPFeatureExtractor
+from transformers import AutoTokenizer
 from transformers import CLIPImageProcessor
 import json
+
+class MultimodalParquetDataset(Dataset):
+    """加载 pack_imagenet_hf.py 产出的 HF parquet 数据集（image/text/label/...）。
+
+    与 MultimodalDataset 输出格式一致：{"input_ids", "attention_mask", "pixel_values"}。
+    支持确定性 train/val 划分（按 source_id 哈希），保证多次运行划分一致且不重叠。
+    """
+
+    def __init__(self, data_dir, tokenizer, image_processor, max_text_len=128, split="train",
+                 val_ratio=0.02, seed=42, image_transform=None):
+        from datasets import load_dataset
+
+        self.tokenizer = tokenizer
+        self.image_processor = image_processor
+        self.max_text_len = max_text_len
+        self.image_transform = image_transform
+
+        ds = load_dataset("parquet", data_dir=data_dir, split="train")
+        # 划分：对 source_id 哈希取模，保证确定性与 train/val 不重叠
+        keep = []
+        for i in range(len(ds)):
+            source_id = ds[i]["source_id"]
+            bucket = hash_source_id(source_id, seed) % 10000
+            if split == "train":
+                if bucket >= int(val_ratio * 10000):
+                    keep.append(i)
+            else:  # val
+                if bucket < int(val_ratio * 10000):
+                    keep.append(i)
+        self.ds = ds.select(keep)
+        if len(self.ds) == 0:
+            raise ValueError(f"Empty '{split}' split from {data_dir} (val_ratio={val_ratio})")
+
+    def __len__(self):
+        return len(self.ds)
+
+    def __getitem__(self, idx):
+        row = self.ds[idx]
+        text = row["text"]
+        img = row["image"]
+        if not isinstance(img, Image.Image):
+            import io as _io
+            img = Image.open(_io.BytesIO(img)).convert("RGB")
+
+        tok = self.tokenizer(
+            text,
+            truncation=True,
+            max_length=self.max_text_len,
+            return_attention_mask=True,
+            return_tensors="pt",
+        )
+        input_ids = tok["input_ids"].squeeze(0)
+        attention_mask = tok["attention_mask"].squeeze(0)
+
+        if self.image_transform is not None:
+            pix = self.image_transform(img)
+        else:
+            pix = self.image_processor(images=img, return_tensors="pt")["pixel_values"].squeeze(0)
+        return {"input_ids": input_ids, "attention_mask": attention_mask, "pixel_values": pix}
+
+
+def hash_source_id(source_id, seed=42):
+    """确定性哈希：不依赖 Python 内置 hash()（每次进程不同）。"""
+    import hashlib
+    digest = hashlib.md5(f"{seed}:{source_id}".encode("utf-8")).hexdigest()
+    return int(digest, 16)
+
 
 class MultimodalDataset(Dataset):
     def __init__(self, root_dir, tokenizer, image_processor, max_text_len=128, image_transform=None, key_field='data'):
@@ -77,15 +145,23 @@ def collate_fn(batch, pad_token_id):
 def main():
     TEXT_MODEL = "BAAI/bge-base-zh-v1.5"
     VISION_MODEL = "openai/clip-vit-base-patch32"
-    root_dir = "/root/research/miniembedding/data/coco128"
+    data_dir = "data/imagenet-1k-zh-captions"
     tokenizer = AutoTokenizer.from_pretrained(TEXT_MODEL, use_fast=True)
-    feature_extractor = CLIPFeatureExtractor.from_pretrained(VISION_MODEL)
-    train_dataset = MultimodalDataset(root_dir, tokenizer, feature_extractor)
-    
+    image_processor = CLIPImageProcessor.from_pretrained(VISION_MODEL)
+    train_dataset = MultimodalParquetDataset(
+        data_dir, tokenizer, image_processor, max_text_len=128, split="train", val_ratio=0.02
+    )
+    val_dataset = MultimodalParquetDataset(
+        data_dir, tokenizer, image_processor, max_text_len=128, split="val", val_ratio=0.02
+    )
+    print(f"train={len(train_dataset)}, val={len(val_dataset)}")
+
     BATCH_SIZE = 64
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
     from torch.utils.data import DataLoader
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=lambda b: collate_fn(b, pad_token_id=pad_token_id))
+    batch = next(iter(train_loader))
+    print({k: v.shape for k, v in batch.items()})
 
 if __name__ == '__main__':
     main()

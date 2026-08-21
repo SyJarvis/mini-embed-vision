@@ -44,12 +44,26 @@ try:
 except ImportError:
     _has_peft = False
 
-def _concat_all_gather(tensor):
-    if not torch.distributed.is_initialized():
-        return tensor
-    tensors_gather = [torch.zeros_like(tensor) for _ in range(torch.distributed.get_world_size())]
-    torch.distributed.all_gather(tensors_gather, tensor)
-    return torch.cat(tensors_gather, dim=0)
+class AllGatherWithGrad(torch.autograd.Function):
+    """all_gather 且对本地分片保留梯度（open_clip 风格）。
+
+    标准 all_gather 不可微（其他 rank 的张量不带梯度）。backward 时每个 rank
+    只取全局梯度中属于自己分片的部分直接返回：各 rank 的 loss 相互独立，
+    本 rank loss 对本地嵌入的梯度恰好是 (dL/dg)[本 rank 分片]，无需跨 rank 聚合。
+    """
+
+    @staticmethod
+    def forward(ctx, tensor):
+        world_size = torch.distributed.get_world_size()
+        gathered = [torch.zeros_like(tensor) for _ in range(world_size)]
+        torch.distributed.all_gather(gathered, tensor)
+        return torch.cat(gathered, dim=0)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        world_size = torch.distributed.get_world_size()
+        rank = torch.distributed.get_rank()
+        return grad_output.chunk(world_size, dim=0)[rank].contiguous()
 
 class MiniEmbedVisionModel(PreTrainedModel):
     config_class = MiniEmbedVisionConfig
@@ -118,6 +132,13 @@ class MiniEmbedVisionModel(PreTrainedModel):
         self.vision_proj = nn.Linear(vis_hidden, config.embed_dim) if vis_hidden != config.embed_dim else nn.Identity()
         self.logit_scale = nn.Parameter(torch.ones([]) * torch.log(torch.tensor(1 / 0.07)))
     
+    def train(self, mode: bool = True):
+        """保持冻结的 text_encoder 永远处于 eval 模式（dropout 不生效）。"""
+        super().train(mode)
+        if getattr(self.config, "freeze_text", False):
+            self.text_encoder.eval()
+        return self
+
     def _bge_pool(self, last_hidden, attention_mask):
         mask = attention_mask.unsqueeze(-1).expand(last_hidden.size()).float()
         sum_emb = torch.sum(last_hidden * mask, dim=1)
@@ -173,45 +194,36 @@ class MiniEmbedVisionModel(PreTrainedModel):
         if text_emb is None or image_emb is None:
             raise ValueError("For training, both text and image inputs are required.")
 
-        # Gather across GPUs for large-batch negatives
+        # Gather across GPUs for large-batch negatives（可微版本）
         if gather_for_ddp and torch.distributed.is_initialized():
-            text_emb_all = _concat_all_gather(text_emb)
-            image_emb_all = _concat_all_gather(image_emb)
+            text_emb_all = AllGatherWithGrad.apply(text_emb)
+            image_emb_all = AllGatherWithGrad.apply(image_emb)
         else:
             text_emb_all = text_emb
             image_emb_all = image_emb
 
         logit_scale = torch.clamp(self.logit_scale.exp(), max=100.0)
         logits_per_text = logit_scale * text_emb @ image_emb_all.t()   # [B, global_B]
-        logits_per_image = logits_per_text.t()                         # [global_B, B]
+        logits_per_image = logit_scale * image_emb @ text_emb_all.t()  # [B, global_B]
 
         loss = None
         if return_loss:
-            # Assume 1:1 pairing in local batch
+            # 全局负例：本地 text 与所有 rank 的 image 两两配对，
+            # 正样本位于全局对角线上，偏移 = rank * local_batch_size
             local_batch_size = text_emb.size(0)
-            global_batch_size = text_emb_all.size(0)
-            # Create labels: local i matches global i
-            labels = torch.arange(local_batch_size, device=text_emb.device)
-            # But logits_per_text is [local_B, global_B], so we need to align
-            # Standard CLIP: each local text matches its corresponding image in global list
-            # Find the global indices of local images
-            if torch.distributed.is_initialized():
+            if gather_for_ddp and torch.distributed.is_initialized():
                 rank = torch.distributed.get_rank()
-                local_image_start = rank * local_batch_size
-                image_indices = torch.arange(local_image_start, local_image_start + local_batch_size, device=text_emb.device)
-                # We can't easily compute loss without knowing global alignment
-                # Simpler: only use local batch for loss (common in practice)
-                logits_local = logit_scale * text_emb @ image_emb.t()  # [B, B]
-                labels_local = torch.arange(local_batch_size, device=text_emb.device)
-                loss_i = F.cross_entropy(logits_local, labels_local)
-                loss_t = F.cross_entropy(logits_local.t(), labels_local)
-                loss = (loss_i + loss_t) / 2
+                labels = torch.arange(
+                    rank * local_batch_size,
+                    rank * local_batch_size + local_batch_size,
+                    device=text_emb.device,
+                )
             else:
-                logits_local = logits_per_text  # [B, B]
-                labels_local = torch.arange(local_batch_size, device=text_emb.device)
-                loss_i = F.cross_entropy(logits_local, labels_local)
-                loss_t = F.cross_entropy(logits_local.t(), labels_local)
-                loss = (loss_i + loss_t) / 2
+                labels = torch.arange(local_batch_size, device=text_emb.device)
+            # t2i: 本地 text 为锚；i2t: 本地 image 为锚（各 rank 合起来覆盖全局）
+            loss_t2i = F.cross_entropy(logits_per_text, labels)
+            loss_i2t = F.cross_entropy(logits_per_image, labels)
+            loss = (loss_t2i + loss_i2t) / 2
 
         return ModelOutput(
             loss=loss,
