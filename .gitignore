@@ -5,6 +5,7 @@ clip-vit-base-patch32/
 nomic-embed-text-v1.5/
 eva02_base_patch14_224.mim_in22k/
 bge-base-zh-v1.5/
+multilingual-e5-small/
 checkpoints/
 checkpoints_*/
 *.safetensors
