@@ -1,9 +1,32 @@
 # Model weights
 mini-embed-vision-v1.0/
+mini-embed-vision-v1.5/
+clip-vit-base-patch32/
+nomic-embed-text-v1.5/
+eva02_base_patch14_224.mim_in22k/
+bge-base-zh-v1.5/
+checkpoints/
+checkpoints_*/
 *.safetensors
 *.bin
 *.pth
 *.ckpt
+
+# Secrets
+.env
+
+# Data & experiment artifacts
+data/
+wandb/
+logs/
+*.log
+
+# Tools
+.claude/
+Untitled
+
+# Pretrained HF caches in repo root
+hf_cache/
 
 # Python
 __pycache__/
