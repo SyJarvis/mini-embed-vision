@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 
-from . import caption, pack, pack_bilingual, translate, validate
+from . import caption, join_coco, pack, pack_bilingual, translate, validate
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -12,6 +12,9 @@ def build_parser() -> argparse.ArgumentParser:
     pack.add_arguments(subparsers.add_parser("pack", help="Pack captions and images into training parquet"))
     pack_bilingual.add_arguments(
         subparsers.add_parser("pack-bilingual", help="Join packed zh parquet with zh→en translations")
+    )
+    join_coco.add_arguments(
+        subparsers.add_parser("join-coco", help="Join COCO detection parquet with en→zh translations")
     )
     translate.add_arguments(subparsers.add_parser("translate", help="Translate Chinese captions to English"))
     validate.add_arguments(subparsers.add_parser("validate", help="Validate generated caption JSONL"))
@@ -28,5 +31,7 @@ def main() -> None:
         pack.run(args)
     elif args.command == "pack-bilingual":
         pack_bilingual.run(args)
+    elif args.command == "join-coco":
+        join_coco.run(args)
     else:
         validate.run(args)

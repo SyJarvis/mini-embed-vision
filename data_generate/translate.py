@@ -13,7 +13,8 @@ from tqdm.auto import tqdm
 from .common import JSONLRecord, append_jsonl, load_done_ids, load_dotenv, normalize_text
 
 
-TRANSLATE_PROMPT = "Translate the following Chinese image caption to English. Keep the original objective, factual style describing only visible content. Output only the translation, no explanations, no quotes, no extra text.\n\n"
+TRANSLATE_PROMPT_ZH2EN = "Translate the following Chinese image caption to English. Keep the original objective, factual style describing only visible content. Output only the translation, no explanations, no quotes, no extra text.\n\n"
+TRANSLATE_PROMPT_EN2ZH = "把下面的英文图片描述翻译成中文。保持客观、只描述可见内容的风格。只输出译文本身，不要解释、不要引号、不要多余文字。\n\n"
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -34,6 +35,8 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-tokens", type=int, default=512)
     parser.add_argument("--limit", type=int, default=0,
                         help="Process at most N items; 0 means all")
+    parser.add_argument("--direction", choices=["zh2en", "en2zh"], default="zh2en",
+                        help="zh2en: 中文列 text → 英文；en2zh: 英文列 text → 中文")
     parser.add_argument("--dry-run", action="store_true",
                         help="Scan inputs without calling the API")
 
@@ -49,7 +52,7 @@ def build_client(args: argparse.Namespace):
     return OpenAI(base_url=args.base_url, api_key=api_key, timeout=args.timeout)
 
 
-def extract_translation(content: str | None, reasoning: str | None) -> str:
+def extract_translation(content: str | None, reasoning: str | None, direction: str = "zh2en") -> str:
     raw = normalize_text(content) if content else ""
 
     if raw:
@@ -58,6 +61,17 @@ def extract_translation(content: str | None, reasoning: str | None) -> str:
     raw_reasoning = normalize_text(reasoning) if reasoning else ""
     if not raw_reasoning:
         raise ValueError("Empty response from model")
+
+    if direction == "en2zh":
+        # Strategy: first Chinese-dominant line
+        for line in raw_reasoning.split("\n"):
+            line = line.strip().strip('"\'„"”“')
+            cjk = sum(1 for c in line if "\u4e00" <= c <= "\u9fff")
+            if cjk >= 4 and cjk / max(len(line), 1) > 0.3:
+                candidate = normalize_text(line)
+                if candidate and len(candidate) > 5:
+                    return candidate
+        raise ValueError(f"Could not extract zh translation from reasoning:\n{raw_reasoning[:200]}")
 
     # Strategy 1: Find line starting with "翻译："
     for line in raw_reasoning.split("\n"):
@@ -97,23 +111,24 @@ def extract_translation(content: str | None, reasoning: str | None) -> str:
     raise ValueError(f"Could not extract translation from reasoning:\n{raw_reasoning[:200]}")
 
 
-def request_translation(client, args: argparse.Namespace, zh_text: str) -> str:
+def request_translation(client, args: argparse.Namespace, src_text: str) -> str:
+    prompt = TRANSLATE_PROMPT_ZH2EN if args.direction == "zh2en" else TRANSLATE_PROMPT_EN2ZH
     last_error: Exception | None = None
     for attempt in range(args.retries + 1):
         try:
             response = client.chat.completions.create(
                 model=args.model,
                 messages=[
-                    {"role": "user", "content": TRANSLATE_PROMPT + zh_text},
+                    {"role": "user", "content": prompt + src_text},
                 ],
                 temperature=0,
                 max_tokens=args.max_tokens,
             )
             msg = response.choices[0].message
-            en_text = extract_translation(msg.content, getattr(msg, "reasoning", None))
-            if not en_text:
+            out_text = extract_translation(msg.content, getattr(msg, "reasoning", None), args.direction)
+            if not out_text:
                 raise ValueError("Empty translation after extraction")
-            return en_text
+            return out_text
         except Exception as exc:
             last_error = exc
             if attempt >= args.retries:
@@ -122,18 +137,21 @@ def request_translation(client, args: argparse.Namespace, zh_text: str) -> str:
     raise RuntimeError(str(last_error) if last_error else "Unknown translation error")
 
 
-def process_one(source_id: str, zh_text: str, args: argparse.Namespace,
-                 client) -> JSONLRecord:
+def process_one(source_id: str, src_text: str, args: argparse.Namespace, client) -> JSONLRecord:
     record: JSONLRecord = {"source_id": source_id}
     try:
         if args.dry_run:
-            record.update({"ok": True, "dry_run": True, "text_en": "", "text_zh": zh_text})
+            record.update({"ok": True, "dry_run": True, "text_en": "", "text_zh": ""})
             return record
-        en_text = request_translation(client, args, zh_text)
-        record.update({"ok": True, "text_zh": zh_text, "text_en": en_text})
+        out_text = request_translation(client, args, src_text)
+        if args.direction == "en2zh":
+            record.update({"ok": True, "text_en": src_text, "text_zh": out_text})
+        else:
+            record.update({"ok": True, "text_zh": src_text, "text_en": out_text})
         return record
     except Exception as exc:
-        record.update({"ok": False, "text_zh": zh_text, "error": str(exc)})
+        record.update({"ok": False, "text_en": src_text if args.direction == "en2zh" else "",
+                       "text_zh": src_text if args.direction == "zh2en" else "", "error": str(exc)})
         return record
 
 
@@ -219,8 +237,8 @@ def run(args: argparse.Namespace) -> None:
         # Prime the pipeline
         for _ in range(max_in_flight):
             try:
-                sid, zh_text = next(item_iter)
-                in_flight.append(pool.submit(process_one, sid, zh_text, args, client))
+                sid, src_text = next(item_iter)
+                in_flight.append(pool.submit(process_one, sid, src_text, args, client))
             except StopIteration:
                 break
 
@@ -232,8 +250,8 @@ def run(args: argparse.Namespace) -> None:
                     break
                 # Replenish
                 try:
-                    sid, zh_text = next(item_iter)
-                    in_flight.append(pool.submit(process_one, sid, zh_text, args, client))
+                    sid, src_text = next(item_iter)
+                    in_flight.append(pool.submit(process_one, sid, src_text, args, client))
                 except StopIteration:
                     pass
                 break  # yield back to outer loop to refresh in_flight
