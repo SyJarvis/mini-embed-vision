@@ -1,126 +1,162 @@
 #!/usr/bin/env python3
 """
-C-MTEB Benchmark Runner for MiniEmbedVision.
+mini-embed-vision Benchmark Runner (MTEB v2).
 
 Usage:
-    # 快速评测（5个核心任务）
-    python benchmark/run_benchmark.py --model_path ./mini-embed-vision-v1.0 --tasks quick
+    # ImageNet classification
+    python benchmark/run_benchmark.py --checkpoint checkpoints/best.pth --tasks imagenet
 
-    # 全量评测
-    python benchmark/run_benchmark.py --model_path ./mini-embed-vision-v1.0 --tasks full
+    # Flickr30k text→image retrieval
+    python benchmark/run_benchmark.py --checkpoint checkpoints/best.pth --tasks flickr
 
-    # 指定任务
-    python benchmark/run_benchmark.py --model_path ./mini-embed-vision-v1.0 --tasks "T2Retrieval,ATEC,TNews"
+    # Quick image tasks (ImageNet + Flickr)
+    python benchmark/run_benchmark.py --checkpoint checkpoints/best.pth --tasks quick_image
 
-    # 查看可用任务
+    # Chinese text tasks
+    python benchmark/run_benchmark.py --checkpoint checkpoints/best.pth --tasks quick
+
+    # List available task presets
     python benchmark/run_benchmark.py --list_tasks
 """
 
 import argparse
 import json
-import sys
 import os
+import sys
 from datetime import datetime
 
-# 确保项目根目录在 sys.path 中
+# Ensure project root is on sys.path
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 import mteb
-from benchmark.model_wrapper import MiniEmbedVisionWrapper
-from benchmark.task_configs import get_tasks, list_all_tasks, PRESETS
+from benchmark.model_wrapper import MiniEmbedVisionMTEBWrapper
+from benchmark.task_configs import PRESETS, get_tasks, list_all_tasks
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="C-MTEB Benchmark for MiniEmbedVision")
+    parser = argparse.ArgumentParser(
+        description="mini-embed-vision MTEB Benchmark Runner"
+    )
     parser.add_argument(
-        "--model_path",
+        "--checkpoint",
         type=str,
-        default="./mini-embed-vision-v1.0",
-        help="模型路径（HuggingFace 格式目录）",
+        required=True,
+        help="Path to .pth checkpoint file (e.g. checkpoints/best.pth)",
     )
     parser.add_argument(
         "--tasks",
         type=str,
-        default="quick",
-        help=f"任务预设 ({'/'.join(PRESETS.keys())}) 或逗号分隔的任务名",
+        default="quick_image",
+        help=f"Task preset ({'/'.join(PRESETS.keys())}) or comma-separated task names",
     )
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=32,
-        help="编码批大小 (default: 32)",
+        default=64,
+        help="Encoding batch size (default: 64)",
     )
     parser.add_argument(
         "--max_length",
         type=int,
-        default=512,
-        help="最大序列长度 (default: 512)",
+        default=128,
+        help="Max text sequence length (default: 128)",
     )
     parser.add_argument(
         "--device",
         type=str,
         default=None,
-        help="设备 (cuda/cpu, default: auto)",
+        help="Device (cuda/cpu, default: auto)",
     )
     parser.add_argument(
         "--output_dir",
         type=str,
         default=None,
-        help="结果输出目录 (default: benchmark/results/<timestamp>)",
+        help="Output directory (default: benchmark/results/<timestamp>)",
     )
     parser.add_argument(
         "--list_tasks",
         action="store_true",
-        help="列出所有可用任务并退出",
+        help="List available tasks / presets and exit",
     )
     parser.add_argument(
         "--languages",
         type=str,
         nargs="+",
-        default=["cmn"],
-        help="评测语言 (default: cmn 即中文)",
+        default=None,
+        help=(
+            "Filter tasks by language code(s), e.g. cmn eng-Latn. "
+            "Default: no filter (all languages)."
+        ),
     )
     return parser.parse_args()
 
 
 def print_results_summary(model_result) -> None:
-    """打印评测结果摘要表。"""
+    """Print evaluation results summary.
+
+    Handles MTEB v2 result structures (BenchmarkResults → model_results → task_results).
+    """
     print("\n" + "=" * 70)
-    print("  C-MTEB Evaluation Results Summary")
+    print("  MTEB Evaluation Results Summary")
     print("=" * 70)
 
-    task_results = model_result.task_results
+    # Navigate to the actual TaskResult list
+    if hasattr(model_result, "model_results"):
+        # BenchmarkResults
+        all_task_results = []
+        for mr in model_result.model_results:
+            all_task_results.extend(getattr(mr, "task_results", []))
+    else:
+        all_task_results = getattr(model_result, "task_results", [])
 
-    # 按 main_score 降序排列输出
     rows = []
-    for tr in task_results:
-        if hasattr(tr, "scores") and tr.scores:
-            # scores 是 dict[str, dict[str, Any]]，key 是 hf_subset
-            # 取第一个 subset 的分数
-            for subset, split_scores in tr.scores.items():
-                for split_name, metrics in split_scores.items():
-                    main_score = metrics.get("main_score", None)
-                    rows.append((tr.task_name, subset, split_name, main_score))
+    modalities_seen = set()
+    for tr in all_task_results:
+        task_name = getattr(tr, "task_name", getattr(tr, "task", str(tr)))
+        scores = getattr(tr, "scores", None) or {}
+
+        if isinstance(scores, dict):
+            for subset, split_or_results in scores.items():
+                if isinstance(split_or_results, dict):
+                    # plain scores dict
+                    ms = split_or_results.get("main_score", None)
+                    rows.append((task_name, subset, "test", ms))
+                elif isinstance(split_or_results, list):
+                    # list of experiment score dicts → take first entry's main_score
+                    for entry in split_or_results:
+                        if isinstance(entry, dict) and "main_score" in entry:
+                            rows.append((task_name, subset, "test", entry["main_score"]))
+                            break
+                    else:
+                        rows.append((task_name, subset, "test", None))
+
+        # Collect modality info
+        task_obj = getattr(tr, "task", None)
+        if task_obj and hasattr(task_obj, "metadata"):
+            for m in getattr(task_obj.metadata, "modalities", []):
+                modalities_seen.add(m)
 
     if not rows:
         print("  (No results to display)")
         return
 
-    # 格式化输出
-    print(f"  {'Task':<30} {'Split':<12} {'Score':>10}")
-    print(f"  {'-'*30} {'-'*12} {'-'*10}")
+    # Print modality tags
+    if modalities_seen:
+        print(f"  Modalities: {', '.join(sorted(modalities_seen))}")
+
+    print(f"  {'Task':<35} {'Split':<12} {'Score':>10}")
+    print(f"  {'-'*35} {'-'*12} {'-'*10}")
     for task_name, subset, split_name, score in rows:
         score_str = f"{score:.4f}" if score is not None else "N/A"
-        print(f"  {task_name:<30} {split_name:<12} {score_str:>10}")
+        print(f"  {task_name:<35} {split_name:<12} {score_str:>10}")
 
-    # 计算平均分
     valid_scores = [s for _, _, _, s in rows if s is not None]
     if valid_scores:
         avg = sum(valid_scores) / len(valid_scores)
-        print(f"  {'-'*30} {'-'*12} {'-'*10}")
-        print(f"  {'AVERAGE':<30} {'':12} {avg:>10.4f}")
+        print(f"  {'-'*35} {'-'*12} {'-'*10}")
+        print(f"  {'AVERAGE':<35} {'':12} {avg:>10.4f}")
 
     print("=" * 70)
 
@@ -132,32 +168,46 @@ def main():
         list_all_tasks()
         return
 
-    # 获取任务列表
+    # Resolve task names
     task_names = get_tasks(args.tasks)
     print(f"\n[Config] Tasks: {args.tasks} -> {len(task_names)} tasks")
-    print(f"[Config] Model: {args.model_path}")
+    for t in task_names:
+        print(f"    - {t}")
+    print(f"[Config] Checkpoint: {args.checkpoint}")
     print(f"[Config] Batch size: {args.batch_size}")
-    print(f"[Config] Languages: {args.languages}")
+    print(f"[Config] Max length: {args.max_length}")
+    print(f"[Config] Device: {args.device or 'auto'}")
+    if args.languages:
+        print(f"[Config] Language filter: {args.languages}")
 
-    # 加载 MTEB 任务
+    # Load MTEB tasks
     tasks = mteb.get_tasks(tasks=task_names, languages=args.languages)
     print(f"[Config] Loaded {len(tasks)} tasks from MTEB")
 
-    # 加载模型包装器
-    model = MiniEmbedVisionWrapper(
-        model_path=args.model_path,
+    if len(tasks) == 0:
+        print(
+            "[Error] No tasks loaded. Check that task names are correct and "
+            "language filter (if any) matches task languages."
+        )
+        sys.exit(1)
+
+    # Load model wrapper
+    model = MiniEmbedVisionMTEBWrapper(
+        checkpoint_path=args.checkpoint,
         device=args.device,
-        max_length=args.max_length,
         batch_size=args.batch_size,
+        max_length=args.max_length,
     )
 
-    # 设置输出目录
+    # Setup output directory
     if args.output_dir is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        args.output_dir = os.path.join(_project_root, "benchmark", "results", timestamp)
+        args.output_dir = os.path.join(
+            _project_root, "benchmark", "results", timestamp
+        )
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # 运行评测
+    # Run evaluation
     print(f"\n{'='*70}")
     print("  Starting MTEB Evaluation...")
     print(f"{'='*70}\n")
@@ -165,25 +215,47 @@ def main():
     results = mteb.evaluate(
         model,
         tasks,
-        encode_kwargs={"batch_size": args.batch_size},
+        encode_kwargs={
+            "batch_size": args.batch_size,
+        },
         overwrite_strategy="always",
         show_progress_bar=True,
     )
 
-    # 打印结果摘要
+    # Print results summary
     print_results_summary(results)
 
-    # 保存结果
+    # Save results
     result_file = os.path.join(args.output_dir, "results.json")
-    with open(result_file, "w", encoding="utf-8") as f:
-        json.dump(
-            results.model_dump() if hasattr(results, "model_dump") else str(results),
-            f,
-            ensure_ascii=False,
-            indent=2,
-            default=str,
-        )
-    print(f"\n[Output] Results saved to: {result_file}")
+    try:
+        if hasattr(results, "model_dump"):
+            data = results.model_dump()
+        else:
+            data = str(results)
+
+        with open(result_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+        print(f"\n[Output] Results saved to: {result_file}")
+    except Exception as e:
+        print(f"\n[Warning] Failed to save results JSON: {e}")
+        # Fallback: try saving model_results separately
+        if hasattr(results, "model_results"):
+            try:
+                fallback_file = os.path.join(args.output_dir, "results_fallback.json")
+                simple = []
+                for mr in results.model_results:
+                    task_data = []
+                    for tr in getattr(mr, "task_results", []):
+                        task_data.append({
+                            "task_name": getattr(tr, "task_name", str(tr)),
+                            "scores": getattr(tr, "scores", {}),
+                        })
+                    simple.append({"model_name": getattr(mr, "model_name", "?"), "tasks": task_data})
+                with open(fallback_file, "w", encoding="utf-8") as f:
+                    json.dump(simple, f, ensure_ascii=False, indent=2, default=str)
+                print(f"[Output] Fallback results saved to: {fallback_file}")
+            except Exception as e2:
+                print(f"[Warning] Fallback save also failed: {e2}")
 
 
 if __name__ == "__main__":

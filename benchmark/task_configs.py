@@ -1,58 +1,72 @@
 """
-C-MTEB task configurations for Chinese text embedding evaluation.
+C-MTEB task configurations for mini-embed-vision benchmark.
 
-Defines task lists, presets, and metadata for running MTEB benchmarks.
+Defines task lists, presets, and metadata for running MTEB benchmarks
+on both text (Chinese C-MTEB) and image / multi-modal tasks.
 """
 
 # ============================================================
-# 完整任务列表（按类别）
+# Text task lists (Chinese C-MTEB)
 # ============================================================
 
 RETRIEVAL_TASKS = [
-    "T2Retrieval",          # 大规模中文段落检索
-    "MMarcoRetrieval",      # 中文 MS MARCO
-    "DuRetrieval",          # 百度搜索引擎查询
-    "CmedqaRetrieval",      # 中文医学问答检索
-    "EcomRetrieval",        # 电商商品检索
-    "MedicalRetrieval",     # 医学文献检索
-    "CovidRetrieval",       # COVID 文献检索
-    "VideoRetrieval",       # 视频检索
+    "T2Retrieval",
+    "MMarcoRetrieval",
+    "DuRetrieval",
+    "CmedqaRetrieval",
+    "EcomRetrieval",
+    "MedicalRetrieval",
+    "CovidRetrieval",
+    "VideoRetrieval",
 ]
 
 CLASSIFICATION_TASKS = [
-    "TNews",                # 新闻分类 (15类)
-    "IFlyTek",              # 应用描述分类 (119类)
-    "MultilingualSentiment",# 多语言情感分类
-    "JDReview",             # 京东评论情感
-    "OnlineShopping",       # 在线购物评论
+    "TNews",
+    "IFlyTek",
+    "MultilingualSentiment",
+    "JDReview",
+    "OnlineShopping",
 ]
 
 STS_TASKS = [
-    "ATEC",                 # 蚂蚁金服语义相似度
-    "BQ",                   # 银行问答相似度
-    "LCQMC",                # 问题复述识别
-    "PAWSX",                # 句子相似度
-    "STS22",                # 多语言 STS
+    "ATEC",
+    "BQ",
+    "LCQMC",
+    "PAWSX",
+    "STS22",
 ]
 
 CLUSTERING_TASKS = [
-    "CLSClusteringS2S",     # 学术论文聚类
-    "CLSClusteringS2S.v2",  # 学术论文聚类 v2
-    "ThuNewsClusteringS2S", # 新闻聚类
+    "CLSClusteringS2S",
+    "CLSClusteringS2S.v2",
+    "ThuNewsClusteringS2S",
 ]
 
 RERANKING_TASKS = [
-    "T2Reranking",          # T2 重排序
-    "CMedQAv2-reranking",   # 中文医学问答重排序
+    "T2Reranking",
+    "CMedQAv2-reranking",
 ]
 
 # ============================================================
-# 预设配置
+# Image / multi-modal task lists
+# ============================================================
+
+IMAGE_CLASSIFICATION_TASKS = [
+    "Imagenet1k",               # Imagenet1kClassification (50k val, 1000 classes)
+]
+
+IMAGE_RETRIEVAL_TASKS = [
+    "Flickr30kT2IRetrieval",    # text → image, 31k corpus
+    "Flickr30kI2TRetrieval",    # image → text (optional)
+]
+
+# ============================================================
+# Presets
 # ============================================================
 
 PRESETS = {
     "quick": {
-        "description": "5个核心任务，快速验证",
+        "description": "5 core Chinese text tasks, quick smoke test",
         "tasks": [
             "T2Retrieval",
             "MMarcoRetrieval",
@@ -62,11 +76,11 @@ PRESETS = {
         ],
     },
     "retrieval": {
-        "description": "仅检索类任务",
+        "description": "All Chinese retrieval tasks",
         "tasks": RETRIEVAL_TASKS,
     },
     "full": {
-        "description": "全部 C-MTEB 任务",
+        "description": "All C-MTEB tasks (Chinese text)",
         "tasks": (
             RETRIEVAL_TASKS
             + CLASSIFICATION_TASKS
@@ -75,27 +89,33 @@ PRESETS = {
             + RERANKING_TASKS
         ),
     },
+    # ── Image presets ──
+    "imagenet": {
+        "description": "ImageNet-1k classification (5 experiments)",
+        "tasks": IMAGE_CLASSIFICATION_TASKS,
+    },
+    "flickr": {
+        "description": "Flickr30k text→image retrieval",
+        "tasks": IMAGE_RETRIEVAL_TASKS,
+    },
+    "quick_image": {
+        "description": "Quick image tasks: ImageNet + Flickr30k",
+        "tasks": IMAGE_CLASSIFICATION_TASKS + IMAGE_RETRIEVAL_TASKS,
+    },
 }
 
 
 def get_tasks(preset_or_tasks: str) -> list[str]:
     """
-    根据 preset 名称或逗号分隔的任务名列表获取任务列表。
-
-    Args:
-        preset_or_tasks: "quick" / "full" / "retrieval"，或逗号分隔的任务名
-
-    Returns:
-        任务名列表
+    Return a list of task names from a preset name or comma-separated list.
     """
     if preset_or_tasks in PRESETS:
         return PRESETS[preset_or_tasks]["tasks"]
-    # 视为逗号分隔的任务名
     return [t.strip() for t in preset_or_tasks.split(",") if t.strip()]
 
 
 def get_task_info(task_name: str) -> dict:
-    """获取单个任务的类别和描述。"""
+    """Get the category and description for a single task."""
     all_tasks = {}
     for name in RETRIEVAL_TASKS:
         all_tasks[name] = {"category": "retrieval"}
@@ -107,22 +127,28 @@ def get_task_info(task_name: str) -> dict:
         all_tasks[name] = {"category": "clustering"}
     for name in RERANKING_TASKS:
         all_tasks[name] = {"category": "reranking"}
+    for name in IMAGE_CLASSIFICATION_TASKS:
+        all_tasks[name] = {"category": "image_classification"}
+    for name in IMAGE_RETRIEVAL_TASKS:
+        all_tasks[name] = {"category": "image_retrieval"}
     return all_tasks.get(task_name, {"category": "unknown"})
 
 
 def list_all_tasks() -> None:
-    """打印所有可用的任务和预设。"""
-    print("=== 预设配置 ===")
+    """Print all available tasks and presets."""
+    print("=== Presets ===")
     for name, preset in PRESETS.items():
         print(f"  {name}: {preset['description']} ({len(preset['tasks'])} tasks)")
     print()
-    print("=== 按类别 ===")
+    print("=== By category ===")
     for cat_name, tasks in [
-        ("Retrieval", RETRIEVAL_TASKS),
-        ("Classification", CLASSIFICATION_TASKS),
+        ("Retrieval (text)", RETRIEVAL_TASKS),
+        ("Classification (text)", CLASSIFICATION_TASKS),
         ("STS", STS_TASKS),
         ("Clustering", CLUSTERING_TASKS),
         ("Reranking", RERANKING_TASKS),
+        ("Image Classification", IMAGE_CLASSIFICATION_TASKS),
+        ("Image Retrieval", IMAGE_RETRIEVAL_TASKS),
     ]:
         print(f"\n  [{cat_name}]")
         for t in tasks:
