@@ -16,7 +16,7 @@ class MultimodalParquetDataset(Dataset):
     """
 
     def __init__(self, data_dir, tokenizer, image_processor, max_text_len=128, split="train",
-                 val_ratio=0.02, seed=42, image_transform=None, en_ratio=0.0):
+                 val_ratio=0.02, seed=42, image_transform=None, en_ratio=0.0, text_prefix=None):
         from datasets import load_dataset
 
         self.tokenizer = tokenizer
@@ -27,19 +27,19 @@ class MultimodalParquetDataset(Dataset):
         # en_ratio=0 纯中文（默认，兼容旧数据），en_ratio=1 纯英文，0.5 混合。
         self.en_ratio = float(en_ratio)
         self.rng = random.Random(seed + (0 if split == "train" else 1))
+        # 训练文本前缀（e5 系列要求 'passage: '）
+        self.text_prefix = text_prefix or ""
 
         ds = load_dataset("parquet", data_dir=data_dir, split="train")
         # 划分：对 source_id 哈希取模，保证确定性与 train/val 不重叠
-        keep = []
-        for i in range(len(ds)):
-            source_id = ds[i]["source_id"]
-            bucket = hash_source_id(source_id, seed) % 10000
-            if split == "train":
-                if bucket >= int(val_ratio * 10000):
-                    keep.append(i)
-            else:  # val
-                if bucket < int(val_ratio * 10000):
-                    keep.append(i)
+        # 注意：一次性取整列（避免逐行访问触发整行/图片解码）
+        source_ids = ds["source_id"]
+        keep = [
+            i
+            for i, source_id in enumerate(source_ids)
+            if (hash_source_id(source_id, seed) % 10000 >= int(val_ratio * 10000))
+            == (split == "train")
+        ]
         self.ds = ds.select(keep)
         if len(self.ds) == 0:
             raise ValueError(f"Empty '{split}' split from {data_dir} (val_ratio={val_ratio})")
@@ -54,6 +54,8 @@ class MultimodalParquetDataset(Dataset):
             text_en = row.get("text_en") if isinstance(row, dict) else None
             if text_en and self.rng.random() < self.en_ratio:
                 text = text_en
+        if self.text_prefix:
+            text = self.text_prefix + text
         img = row["image"]
         if not isinstance(img, Image.Image):
             import io as _io

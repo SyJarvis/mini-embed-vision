@@ -28,6 +28,12 @@ def parse_args():
         "--language", choices=["en", "zh"], default="zh",
         help="Language for text queries (default: zh, uses translated queries)",
     )
+    parser.add_argument("--text-model", default="BAAI/bge-base-zh-v1.5")
+    parser.add_argument("--vision-backend", choices=["transformers", "timm"], default="transformers")
+    parser.add_argument("--timm-model-name", default="eva02_base_patch14_224")
+    parser.add_argument("--text-pooling", choices=["cls", "mean"], default="cls")
+    parser.add_argument("--query-prefix", default=None, help="e.g. 'query: ' for e5 models")
+    parser.add_argument("--model-revision", default="v1.5")
     return parser.parse_args()
 
 
@@ -122,10 +128,15 @@ def main():
             args.device,
             batch_size=args.batch_size,
             max_length=512,
+            text_model_name=args.text_model,
+            vision_backend=args.vision_backend,
+            timm_model_name=args.timm_model_name,
+            text_pooling=args.text_pooling,
+            query_prefix=args.query_prefix,
         )
         query_embeddings, image_embeddings = encode(wrapper, queries["text"], corpus["image"])
         model_name = "teamix/mini-embed-vision"
-        model_revision = "v1.5"
+        model_revision = args.model_revision
     scores = query_embeddings @ image_embeddings.t()
     rankings = scores.argsort(dim=1, descending=True).tolist()
 

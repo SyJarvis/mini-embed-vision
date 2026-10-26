@@ -48,6 +48,10 @@ def parse_args():
     p.add_argument("--val-ratio", type=float, default=0.02)
     p.add_argument("--en-ratio", type=float, default=0.0,
                    help="双语配比：数据含 text_en 列时每个样本取英文的概率（0=纯中，1=纯英，0.5=混合）")
+    p.add_argument("--text-pooling", choices=["cls", "mean"], default="mean",
+                   help="文本池化策略（e5 官方为 mean，bge 为 cls；默认 mean）")
+    p.add_argument("--text-prefix", default=None,
+                   help="训练文本前缀，如 e5 系列的 'passage: '（默认不加）")
     p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--save-dir", default="./checkpoints")
     p.add_argument("--save-every", type=int, default=1, help="每 N 个 epoch 保存一次")
@@ -116,6 +120,7 @@ def build_model(args, device):
         vision_model_name=args.vision_model,
         vision_backend=args.vision_backend,
         timm_model_name=args.timm_model_name,
+        text_pooling=args.text_pooling,
         enable_reranker=args.enable_reranker,
         reranker_hidden_dim=args.reranker_hidden_dim,
         reranker_dropout=args.reranker_dropout,
@@ -249,6 +254,7 @@ def main():
         split="train",
         val_ratio=args.val_ratio,
         en_ratio=args.en_ratio,
+        text_prefix=args.text_prefix,
     )
     val_dataset = MultimodalParquetDataset(
         data_dir=args.data_dir,
@@ -258,6 +264,7 @@ def main():
         split="val",
         val_ratio=args.val_ratio,
         en_ratio=args.en_ratio,
+        text_prefix=args.text_prefix,
     )
     print_rank0(f"train={len(train_dataset)}, val={len(val_dataset)}")
 

@@ -58,6 +58,8 @@ class MiniEmbedVisionMTEBWrapper(AbsEncoder):
         enable_reranker: bool = False,
         local_vision_path: str | None = None,
         local_text_path: str | None = None,
+        text_pooling: str = "cls",
+        query_prefix: str | None = None,
         **kwargs: Any,
     ):
         if device is None:
@@ -68,6 +70,7 @@ class MiniEmbedVisionMTEBWrapper(AbsEncoder):
         self.checkpoint_path = checkpoint_path
         self.batch_size = batch_size
         self.max_length = max_length
+        self.query_prefix = query_prefix or ""
 
         # Use local model dirs if they exist (network may be blocked)
         _project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -110,6 +113,7 @@ class MiniEmbedVisionMTEBWrapper(AbsEncoder):
                 vision_model_name=resolved_vision,
                 vision_backend=vision_backend,
                 timm_model_name=timm_model_name,
+                text_pooling=text_pooling,
                 enable_reranker=enable_reranker,
                 freeze_text=True,
             )
@@ -280,6 +284,8 @@ class MiniEmbedVisionMTEBWrapper(AbsEncoder):
 
     def _encode_texts(self, texts: list[str]) -> torch.Tensor:
         """Encode a batch of texts → [N, embed_dim], L2-normalised."""
+        if self.query_prefix:
+            texts = [self.query_prefix + t for t in texts]
         encoded = self.tokenizer(
             texts,
             padding=True,
