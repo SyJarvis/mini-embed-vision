@@ -16,13 +16,17 @@ class MultimodalParquetDataset(Dataset):
     """
 
     def __init__(self, data_dir, tokenizer, image_processor, max_text_len=128, split="train",
-                 val_ratio=0.02, seed=42, image_transform=None):
+                 val_ratio=0.02, seed=42, image_transform=None, en_ratio=0.0):
         from datasets import load_dataset
 
         self.tokenizer = tokenizer
         self.image_processor = image_processor
         self.max_text_len = max_text_len
         self.image_transform = image_transform
+        # 双语配比：数据含 text_en 列时，每个样本以 en_ratio 概率取英文描述。
+        # en_ratio=0 纯中文（默认，兼容旧数据），en_ratio=1 纯英文，0.5 混合。
+        self.en_ratio = float(en_ratio)
+        self.rng = random.Random(seed + (0 if split == "train" else 1))
 
         ds = load_dataset("parquet", data_dir=data_dir, split="train")
         # 划分：对 source_id 哈希取模，保证确定性与 train/val 不重叠
@@ -46,6 +50,10 @@ class MultimodalParquetDataset(Dataset):
     def __getitem__(self, idx):
         row = self.ds[idx]
         text = row["text"]
+        if self.en_ratio > 0.0:
+            text_en = row.get("text_en") if isinstance(row, dict) else None
+            if text_en and self.rng.random() < self.en_ratio:
+                text = text_en
         img = row["image"]
         if not isinstance(img, Image.Image):
             import io as _io

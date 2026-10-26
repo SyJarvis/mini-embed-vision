@@ -46,6 +46,8 @@ def parse_args():
     p.add_argument("--grad-accum", type=int, default=1)
     p.add_argument("--max-text-len", type=int, default=512)
     p.add_argument("--val-ratio", type=float, default=0.02)
+    p.add_argument("--en-ratio", type=float, default=0.0,
+                   help="双语配比：数据含 text_en 列时每个样本取英文的概率（0=纯中，1=纯英，0.5=混合）")
     p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--save-dir", default="./checkpoints")
     p.add_argument("--save-every", type=int, default=1, help="每 N 个 epoch 保存一次")
@@ -246,6 +248,7 @@ def main():
         max_text_len=args.max_text_len,
         split="train",
         val_ratio=args.val_ratio,
+        en_ratio=args.en_ratio,
     )
     val_dataset = MultimodalParquetDataset(
         data_dir=args.data_dir,
@@ -254,6 +257,7 @@ def main():
         max_text_len=args.max_text_len,
         split="val",
         val_ratio=args.val_ratio,
+        en_ratio=args.en_ratio,
     )
     print_rank0(f"train={len(train_dataset)}, val={len(val_dataset)}")
 
