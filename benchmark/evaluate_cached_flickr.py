@@ -175,7 +175,10 @@ def main():
     aggregate["main_score"] = aggregate["ndcg_at_10"]
 
     rerank_aggregate = {}
-    if args.model_backend != "nomic":
+    reranker_enabled = (args.model_backend != "nomic") and getattr(
+        wrapper.model.config, "enable_reranker", False
+    )
+    if reranker_enabled:
         rerank_evaluator = RelevanceEvaluator(
             query_relevance,
             {f"ndcg_cut.{k_value}" for k_value in k_values if k_value <= 100},
