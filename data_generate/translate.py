@@ -138,7 +138,7 @@ def request_translation(client, args: argparse.Namespace, src_text: str) -> str:
 
 
 def process_one(source_id: str, src_text: str, args: argparse.Namespace, client) -> JSONLRecord:
-    record: JSONLRecord = {"source_id": source_id}
+    record: JSONLRecord = {"source_id": source_id, "model": args.model}
     try:
         if args.dry_run:
             record.update({"ok": True, "dry_run": True, "text_en": "", "text_zh": ""})
@@ -188,6 +188,17 @@ def run(args: argparse.Namespace) -> None:
     errors = args.error_output or output.with_name(output.name + ".errors.jsonl")
     done_ids = load_done_ids(output)
     client = None if args.dry_run else build_client(args)
+
+    # Run provenance: append/update a sidecar meta file so the model/config
+    # used for each run is recorded alongside the data itself.
+    meta_path = output.with_name(output.name + ".meta.jsonl")
+    append_jsonl(meta_path, {
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "direction": args.direction,
+        "model": args.model,
+        "concurrency": args.concurrency,
+        "done_ids_at_start": len(done_ids),
+    })
 
     # Build progress with a quick scan for total count
     from datasets import Dataset
