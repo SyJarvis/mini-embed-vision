@@ -22,6 +22,7 @@ from transformers import (
     CLIPImageProcessor,
     get_linear_schedule_with_warmup,
 )
+from torchvision import transforms
 from tqdm.auto import tqdm
 
 from data import MultimodalParquetDataset, collate_fn
@@ -34,14 +35,16 @@ def parse_args():
     p.add_argument("--data-dir", default="data/imagenet-1k-zh-captions")
     p.add_argument("--text-model", default="BAAI/bge-base-zh-v1.5")
     p.add_argument("--vision-model", default="openai/clip-vit-base-patch32")
+    p.add_argument("--vision-backend", choices=["transformers", "timm"], default="transformers")
+    p.add_argument("--timm-model-name", default="eva02_base_patch14_224")
     p.add_argument("--embed-dim", type=int, default=768)
-    p.add_argument("--batch-size", type=int, default=128, help="每卡 batch size")
+    p.add_argument("--batch-size", type=int, default=32, help="每卡 batch size")
     p.add_argument("--epochs", type=int, default=30)
-    p.add_argument("--lr", type=float, default=2e-5)
+    p.add_argument("--lr", type=float, default=1e-5)
     p.add_argument("--weight-decay", type=float, default=0.01)
     p.add_argument("--warmup-ratio", type=float, default=0.05)
     p.add_argument("--grad-accum", type=int, default=1)
-    p.add_argument("--max-text-len", type=int, default=128)
+    p.add_argument("--max-text-len", type=int, default=512)
     p.add_argument("--val-ratio", type=float, default=0.02)
     p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--save-dir", default="./checkpoints")
@@ -49,6 +52,15 @@ def parse_args():
     p.add_argument("--val-every", type=int, default=1, help="每 N 个 epoch 验证一次")
     p.add_argument("--patience", type=int, default=3, help="Early stop：R@1 连续 N 轮无提升则停。0=关闭")
     p.add_argument("--use-lora", action="store_true")
+    p.add_argument("--enable-reranker", action="store_true")
+    p.add_argument("--reranker-hidden-dim", type=int, default=256)
+    p.add_argument("--reranker-dropout", type=float, default=0.1)
+    p.add_argument("--reranker-loss-weight", type=float, default=0.2)
+    p.add_argument("--wandb", action="store_true", help="Enable W&B logging on rank 0")
+    p.add_argument("--wandb-project", default="mini-embed-vision")
+    p.add_argument("--wandb-run-name", default=None)
+    p.add_argument("--wandb-entity", default=None)
+    p.add_argument("--wandb-run-id", default=None, help="Stable W&B run id; reuse it when resuming training")
     p.add_argument("--resume", default=None, help="恢复训练的 checkpoint 路径")
     p.add_argument("--smoke", action="store_true", help="冒烟测试：少量数据跑 1 epoch")
     return p.parse_args()
@@ -75,11 +87,37 @@ def print_rank0(*args, **kwargs):
         print(*args, **kwargs)
 
 
+def setup_wandb(args, rank):
+    if not args.wandb or not is_master(rank):
+        return None
+    try:
+        import wandb
+    except ImportError as exc:
+        raise ImportError("wandb is enabled but not installed. Install it with: pip install wandb") from exc
+
+    run = wandb.init(
+        project=args.wandb_project,
+        entity=args.wandb_entity,
+        id=args.wandb_run_id,
+        name=args.wandb_run_name,
+        config=vars(args),
+        resume="allow",
+        save_code=False,
+    )
+    return run
+
+
 def build_model(args, device):
     config = MiniEmbedVisionConfig(
         embed_dim=args.embed_dim,
         text_model_name=args.text_model,
         vision_model_name=args.vision_model,
+        vision_backend=args.vision_backend,
+        timm_model_name=args.timm_model_name,
+        enable_reranker=args.enable_reranker,
+        reranker_hidden_dim=args.reranker_hidden_dim,
+        reranker_dropout=args.reranker_dropout,
+        reranker_loss_weight=args.reranker_loss_weight,
         freeze_text=True,
         use_lora=args.use_lora,
         lora_r=8,
@@ -91,7 +129,8 @@ def build_model(args, device):
 
 
 def train_one_epoch(model, dataloader, optimizer, scheduler, device, scaler,
-                    gradient_accumulation_steps=1, use_ddp=False, epoch=0, log_every=20):
+                    gradient_accumulation_steps=1, use_ddp=False, epoch=0, log_every=20,
+                    args=None, wandb_run=None):
     model.train()
     total_loss = 0.0
     num_steps = 0
@@ -109,6 +148,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, device, scaler,
                 attention_mask=attention_mask,
                 pixel_values=pixel_values,
                 return_loss=True,
+                return_rerank_loss=args.enable_reranker,
                 gather_for_ddp=use_ddp,
             )
             loss = outputs.loss
@@ -132,9 +172,19 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, device, scaler,
             scheduler.step()
 
         total_loss += loss.item() * gradient_accumulation_steps
+        rerank_loss = float(outputs.rerank_loss.detach()) if outputs.rerank_loss is not None else None
         num_steps += 1
         if num_steps % log_every == 0 and is_master(int(os.environ.get("RANK", 0))):
             pbar.set_postfix({"loss": total_loss / num_steps, "lr": scheduler.get_last_lr()[0]})
+            if wandb_run is not None:
+                global_step = epoch * len(dataloader) + step + 1
+                metrics = {
+                    "train/loss": total_loss / num_steps,
+                    "train/learning_rate": scheduler.get_last_lr()[0],
+                }
+                if rerank_loss is not None:
+                    metrics["train/rerank_loss"] = rerank_loss
+                wandb_run.log(metrics, step=global_step)
 
     return total_loss / max(num_steps, 1)
 
@@ -168,10 +218,24 @@ def main():
     rank, local_rank, world_size, use_ddp = setup_distributed()
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
     print_rank0(f"device={device}, world_size={world_size}, use_ddp={use_ddp}")
+    wandb_run = setup_wandb(args, rank)
 
     # === Tokenizer & Processor ===
     tokenizer = AutoTokenizer.from_pretrained(args.text_model, use_fast=True)
-    image_processor = CLIPImageProcessor.from_pretrained(args.vision_model)
+    if args.vision_backend == "timm":
+        image_processor = transforms.Compose(
+            [
+                transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.48145466, 0.4578275, 0.40821073],
+                    std=[0.26862954, 0.26130258, 0.27577711],
+                ),
+            ]
+        )
+    else:
+        image_processor = CLIPImageProcessor.from_pretrained(args.vision_model)
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
 
     # === Dataset ===
@@ -269,6 +333,8 @@ def main():
             gradient_accumulation_steps=args.grad_accum,
             use_ddp=use_ddp,
             epoch=epoch,
+            args=args,
+            wandb_run=wandb_run,
         )
         print_rank0(f"Epoch {epoch+1}/{args.epochs} | Train Loss: {loss:.4f} | lr: {scheduler.get_last_lr()[0]:.2e}")
 
@@ -276,6 +342,16 @@ def main():
             text_embs, img_embs = evaluate_embeddings(model, val_loader, device)
             recalls = compute_recall_at_k(text_embs, img_embs, k_list=[1, 5, 10])
             print_rank0(f"Epoch {epoch+1} | Val Recall@1/5/10: {recalls}")
+            if wandb_run is not None:
+                wandb_run.log(
+                    {
+                        "val/R@1": recalls["R@1"],
+                        "val/R@5": recalls["R@5"],
+                        "val/R@10": recalls["R@10"],
+                        "epoch": epoch + 1,
+                    },
+                    step=(epoch + 1) * len(train_loader),
+                )
 
             if use_ddp:
                 dist.barrier()
@@ -292,6 +368,9 @@ def main():
                         "epoch": epoch + 1,
                         "recall": recalls,
                     }, path)
+                    if wandb_run is not None:
+                        wandb_run.summary["best/R@1"] = best_recall
+                        wandb_run.summary["best/epoch"] = best_epoch
                     print_rank0(f"saved best → {path} (R@1={best_recall:.4f})")
                 else:
                     epochs_no_improve += 1
@@ -319,6 +398,8 @@ def main():
 
     if use_ddp:
         dist.destroy_process_group()
+    if wandb_run is not None:
+        wandb_run.finish()
     print_rank0("done.")
 
 

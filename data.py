@@ -5,6 +5,7 @@ import torch
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 from transformers import CLIPImageProcessor
+from torchvision import transforms
 import json
 
 class MultimodalParquetDataset(Dataset):
@@ -62,6 +63,8 @@ class MultimodalParquetDataset(Dataset):
 
         if self.image_transform is not None:
             pix = self.image_transform(img)
+        elif isinstance(self.image_processor, transforms.Compose):
+            pix = self.image_processor(img)
         else:
             pix = self.image_processor(images=img, return_tensors="pt")["pixel_values"].squeeze(0)
         return {"input_ids": input_ids, "attention_mask": attention_mask, "pixel_values": pix}
@@ -79,7 +82,7 @@ class MultimodalDataset(Dataset):
         """
         samples: list of {"text": str, "image_path": str}
         tokenizer: AutoTokenizer for BGE
-        image_processor: CLIPImageProcessor for images
+            image_processor: CLIPImageProcessor or torchvision transform
         """
         self.root_dir = root_dir
         self.samples = []  # 存储 (图像路径, 标签) 的列表
@@ -126,6 +129,8 @@ class MultimodalDataset(Dataset):
         img = Image.open(img_path).convert("RGB")
         if self.image_transform is not None:
             pix = self.image_transform(img)  # should produce tensor C,H,W
+        elif isinstance(self.image_processor, transforms.Compose):
+            pix = self.image_processor(img)
         else:
             processed_image = self.image_processor(images=img, return_tensors="pt")
             pix = processed_image["pixel_values"].squeeze(0)  # [C,H,W]
