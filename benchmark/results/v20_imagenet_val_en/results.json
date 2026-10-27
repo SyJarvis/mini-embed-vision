@@ -1,0 +1,17 @@
+{
+  "model_name": "teamix/mini-embed-vision",
+  "model_revision": "v2.0",
+  "task_name": "ImageNet1kValZeroShotClassification",
+  "protocol": "Full 50,000-image validation set; zero-shot classification",
+  "class_prompt": "{class_name}",
+  "language": "en",
+  "image_count": 50000,
+  "class_count": 1000,
+  "scores": {
+    "validation": {
+      "accuracy": 0.02914,
+      "top_5_accuracy": 0.09706,
+      "main_score": 0.02914
+    }
+  }
+}

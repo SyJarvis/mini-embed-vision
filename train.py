@@ -32,7 +32,8 @@ from retrieval import compute_recall_at_k
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--data-dir", default="data/imagenet-1k-zh-captions")
+    p.add_argument("--data-dir", nargs="+", default=["data/imagenet-1k-zh-captions"],
+                   help="One or more parquet dataset dirs (mixed training)")
     p.add_argument("--text-model", default="BAAI/bge-base-zh-v1.5")
     p.add_argument("--vision-model", default="openai/clip-vit-base-patch32")
     p.add_argument("--vision-backend", choices=["transformers", "timm"], default="transformers")
@@ -246,26 +247,30 @@ def main():
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
 
     # === Dataset ===
-    train_dataset = MultimodalParquetDataset(
-        data_dir=args.data_dir,
-        tokenizer=tokenizer,
-        image_processor=image_processor,
-        max_text_len=args.max_text_len,
-        split="train",
-        val_ratio=args.val_ratio,
-        en_ratio=args.en_ratio,
-        text_prefix=args.text_prefix,
-    )
-    val_dataset = MultimodalParquetDataset(
-        data_dir=args.data_dir,
-        tokenizer=tokenizer,
-        image_processor=image_processor,
-        max_text_len=args.max_text_len,
-        split="val",
-        val_ratio=args.val_ratio,
-        en_ratio=args.en_ratio,
-        text_prefix=args.text_prefix,
-    )
+    # --data-dir 可传多个目录（混合训练），用 ConcatDataset 拼接；
+    # 每个子集独立做确定性 train/val 划分，en_ratio/text_prefix 全局统一。
+    data_dirs = [args.data_dir] if isinstance(args.data_dir, str) else list(args.data_dir)
+    from torch.utils.data import ConcatDataset
+
+    def build_dataset(split: str):
+        datasets = [
+            MultimodalParquetDataset(
+                data_dir=d,
+                tokenizer=tokenizer,
+                image_processor=image_processor,
+                max_text_len=args.max_text_len,
+                split=split,
+                val_ratio=args.val_ratio,
+                en_ratio=args.en_ratio,
+                text_prefix=args.text_prefix,
+            )
+            for d in data_dirs
+        ]
+        return ConcatDataset(datasets) if len(datasets) > 1 else datasets[0]
+
+    train_dataset = build_dataset("train")
+    val_dataset = build_dataset("val")
+    print_rank0(f"data_dirs={data_dirs}")
     print_rank0(f"train={len(train_dataset)}, val={len(val_dataset)}")
 
     if args.smoke:
