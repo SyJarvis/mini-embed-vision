@@ -53,93 +53,20 @@ def build_translation_index(path: Path) -> dict[str, tuple[str, str]]:
 
 def write_standard_metadata(output_dir: Path, dataset_name: str, description: str,
                             num_rows: int, num_shards: int) -> None:
-    """Generate dataset_infos.json + README.md from the shards actually on disk."""
-    shards = sorted(output_dir.glob("train-*.parquet"))
-    dataset_size = sum(s.stat().st_size for s in shards)
-    features_dict = features().to_dict()
+    """Delegate to the shared writer with COCO-specific provenance."""
+    from .common import write_standard_metadata as _write
 
-    infos = {
-        dataset_name: {
-            "description": description,
-            "features": features_dict,
-            "splits": {
-                "train": {
-                    "name": "train",
-                    "num_bytes": dataset_size,
-                    "num_examples": num_rows,
-                    "dataset_name": dataset_name,
-                }
-            },
-            "download_size": dataset_size,
-            "dataset_size": dataset_size,
-        }
-    }
-    (output_dir / "dataset_infos.json").write_text(
-        json.dumps(infos, indent=2, ensure_ascii=False), encoding="utf-8"
+    _write(
+        output_dir, dataset_name, description, num_rows, num_shards,
+        build_steps=(
+            "1. 图片：detection-datasets/coco（COCO 2017 train）\n"
+            "2. 英文 caption：ChristophSchuhmann/MS_COCO_2017_URL_TEXT，每图取第 1 句\n"
+            "3. 中文：`python -m data_generate translate --direction en2zh`（LLM 机器翻译）\n"
+            "4. 打包：`python -m data_generate join-coco`（本数据集）"
+        ),
+        license_yaml="license: other\nlicense_name: coco\nlicense_link: https://cocodataset.org/#termsofuse",
+        license_note="\nCOCO 数据遵循 [COCO Terms of Use](https://cocodataset.org/#termsofuse)。",
     )
-
-    size_mb = dataset_size / 2**20
-    readme = f"""---
-license: other
-license_name: coco
-license_link: https://cocodataset.org/#termsofuse
-task_categories:
-- image-to-text
-language:
-- zh
-- en
-tags:
-- image-captioning
-- bilingual
-- multimodal-embedding
-size_categories:
-- 100K<n<1M
----
-
-# {dataset_name}
-
-{description}
-
-## 数据规模
-
-| 项 | 值 |
-|----|----|
-| 行数 | {num_rows:,} |
-| 分片数 | {num_shards} |
-| 总体积 | {size_mb:,.0f} MB |
-
-## 字段说明
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| image | Image | 原始图片字节（COCO 2017 train） |
-| text | string | 中文描述（英文官方 caption 机器翻译） |
-| text_en | string | 英文官方 caption（每图 1 句） |
-| label | int64 | 恒为 -1（COCO 无 ImageNet 式类别标签） |
-| label_name | string | 空字符串 |
-| source_id | string | `coco/2017/<image_id>`，可溯源到 COCO 图片 |
-
-## 构建流程
-
-1. 图片：detection-datasets/coco（COCO 2017 train，118,287 图）
-2. 英文 caption：ChristophSchuhmann/MS_COCO_2017_URL_TEXT，每图取第 1 句
-3. 中文：`python -m data_generate translate --direction en2zh`（LLM 机器翻译）
-4. 打包：`python -m data_generate join-coco`（本数据集）
-
-## 加载方式
-
-```python
-from datasets import load_dataset
-ds = load_dataset("parquet", data_dir="{output_dir}", split="train")
-# 或
-ds = load_dataset("json", data_files=str(output_dir / "dataset_infos.json"))["train"]
-```
-
-## 引用
-
-COCO 数据遵循 [COCO Terms of Use](https://cocodataset.org/#termsofuse)。
-"""
-    (output_dir / "README.md").write_text(readme, encoding="utf-8")
 
 
 def run(args: argparse.Namespace) -> None:
