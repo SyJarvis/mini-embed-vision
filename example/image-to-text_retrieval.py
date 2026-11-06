@@ -1,52 +1,82 @@
-from PIL import Image
-from transformers import AutoTokenizer, AutoImageProcessor, AutoModel
+"""用 v2.2 导出权重做以图搜文：给定一张图片，对候选文本排序。"""
+import argparse
+import json
+from pathlib import Path
+
 import torch
+from PIL import Image
+from torchvision import transforms
+from transformers import AutoModel, AutoTokenizer
 
-model_dir = "./mini-embed-vision-v1.0"
-model = AutoModel.from_pretrained(model_dir, trust_remote_code=True).to("cuda")
-tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
-image_processor = AutoImageProcessor.from_pretrained(model_dir, trust_remote_code=True)
 
-query_text = "一个男人在图书馆里看书"
+def build_timm_processor(preprocessor_path: str) -> transforms.Compose:
+    with open(preprocessor_path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    size = cfg.get("input_size", 224)
+    if isinstance(size, list):
+        size = size[-1]
+    mean = cfg.get("mean", [0.48145466, 0.4578275, 0.40821073])
+    std = cfg.get("std", [0.26862954, 0.26130258, 0.27577711])
+    interpolation = transforms.InterpolationMode[cfg.get("interpolation", "bicubic").upper()]
+    return transforms.Compose(
+        [
+            transforms.Resize(size, interpolation=interpolation),
+            transforms.CenterCrop(size),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std),
+        ]
+    )
 
-urls = [
-    "data/0001.jpg",  # 猫
-    "data/0002.jpg",  # 狗
-    "data/000000039769.jpg",  # 两只猫
-    "data/person_reading.jpg" # 人
-]
 
-# 编码查询文本
-with torch.no_grad():
-    query_input = tokenizer(
-        query_text, return_tensors="pt", padding=True, truncation=True, max_length=768
-    ).to("cuda")
-    text_embedding = model.encode_text(**query_input) # [1, 768]
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model-dir", default="./mini-embed-vision-v2.2")
+    parser.add_argument("--image", default="data/0003.jpg", help="查询图片路径")
+    parser.add_argument(
+        "--texts",
+        nargs="+",
+        default=[
+            "一个人在室内看书",
+            "两只猫坐在沙发上",
+            "一只狗在草地上奔跑",
+            "海边的自行车",
+            "Decoding throughput vs concurrency",
+            "pi0.7通用模型，使用多种多模态提示进行训练。包括语言、元数据、控制模式和视觉子目标",
+            "鼠标"
+        ],
+        help="候选文本，多个用空格分隔",
+    )
+    parser.add_argument("--query-prefix", default="query: ", help="E5 查询前缀，与 v2.2 评测一致")
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    args = parser.parse_args()
 
-# 编码候选图像
-images = []
-for url in urls:
-    img = Image.open(url).convert("RGB")
-    images.append(img)
+    model = AutoModel.from_pretrained(args.model_dir, trust_remote_code=True, local_files_only=True)
+    model.to(args.device)
+    model.eval()
+    tokenizer = AutoTokenizer.from_pretrained(args.model_dir, use_fast=True, local_files_only=True)
+    image_processor = build_timm_processor(str(Path(args.model_dir) / "preprocessor_config.json"))
 
-with torch.no_grad():
-    image_inputs = image_processor(images, return_tensors="pt").to("cuda")
-    image_embeddings = model.encode_image(**image_inputs) # [N, 768]
+    with Image.open(args.image) as img:
+        pixel_values = image_processor(img.convert("RGB")).unsqueeze(0).to(args.device)
 
-# 计算余弦相似度
-# def similarity(a, b):
-#     a = a / a.norm(dim=-1, keepdim=True)
-#     b = b / b.norm(dim=-1, keepdim=True)
-#     return torch.matmul(a, b.T)
+    prefixed = [(args.query_prefix or "") + t for t in args.texts]
+    encoded = tokenizer(prefixed, return_tensors="pt", padding=True, truncation=True, max_length=512)
+    input_ids = encoded["input_ids"].to(args.device)
+    attention_mask = encoded["attention_mask"].to(args.device)
 
-# similarities = similarity(query_embedding, image_embeddings).squeeze(0)
-similarities = torch.matmul(text_embedding, image_embeddings.T)  # [1, N]
-similarities = similarities.squeeze(0)  # [N]
-# similarities = torch.matmul(query_embedding, image_embeddings.T)
+    with torch.no_grad():
+        image_embedding = model.encode_image(pixel_values)
+        text_embeddings = model.encode_text(input_ids, attention_mask)
 
-# 排序
-ranked_result = sorted(zip(urls, similarities.tolist()), key=lambda x: x[1], reverse=True)
-print(f"查询文本: {query_text}")
-print("以图搜文-相关性排序结果:")
-for i, (url, score) in enumerate(ranked_result, 1):
-    print(f"{i}. {url} -> 相似度: {score:.4f}")
+    similarities = (image_embedding @ text_embeddings.T).squeeze(0).tolist()
+
+    print(f"查询图片: {args.image}")
+    print("以图搜文-相关性排序结果:")
+    for rank, (text, score) in enumerate(
+        sorted(zip(args.texts, similarities), key=lambda item: item[1], reverse=True), 1
+    ):
+        print(f"{rank}. {text} -> 相似度: {score:.4f}")
+
+
+if __name__ == "__main__":
+    main()

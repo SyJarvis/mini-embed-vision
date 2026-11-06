@@ -104,8 +104,11 @@ modelscope download --model shangye/mini-embed-vision-v1.0
 
 * 图文检索示例-以图搜文
 
-  ```
+  在项目根目录运行；此示例默认使用本地 v2.2 checkpoint（E5-small + EVA02），需要该权重文件及 CUDA 环境：
+
+  ```bash
   python example/image-to-text_retrieval.py
+  python example/image-to-text_retrieval.py --image data/person_reading.jpg --texts '一个人在室内看书' '一只狗在草地上奔跑'
   ```
 
 ### 2. 推理示例（代码）
