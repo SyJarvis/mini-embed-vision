@@ -1,0 +1,16 @@
+{
+  "model_name": "nomic-ai/nomic-embed-vision-v1.5",
+  "model_revision": "official-v1.5",
+  "task_name": "ImageNet1kValZeroShotClassification",
+  "protocol": "Full 50,000-image validation set; text class-name zero-shot classification",
+  "class_prompt": "{class_name}",
+  "image_count": 50000,
+  "class_count": 1000,
+  "scores": {
+    "validation": {
+      "accuracy": 0.67718,
+      "top_5_accuracy": 0.85702,
+      "main_score": 0.67718
+    }
+  }
+}

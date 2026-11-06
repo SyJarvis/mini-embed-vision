@@ -1,17 +1,98 @@
 import os
+import random
 from PIL import Image
 import torch
 from torch.utils.data import Dataset
-from transformers import AutoTokenizer, CLIPFeatureExtractor
+from transformers import AutoTokenizer
 from transformers import CLIPImageProcessor
+from torchvision import transforms
 import json
+
+class MultimodalParquetDataset(Dataset):
+    """加载 pack_imagenet_hf.py 产出的 HF parquet 数据集（image/text/label/...）。
+
+    与 MultimodalDataset 输出格式一致：{"input_ids", "attention_mask", "pixel_values"}。
+    支持确定性 train/val 划分（按 source_id 哈希），保证多次运行划分一致且不重叠。
+    """
+
+    def __init__(self, data_dir, tokenizer, image_processor, max_text_len=128, split="train",
+                 val_ratio=0.02, seed=42, image_transform=None, en_ratio=0.0, text_prefix=None):
+        from datasets import load_dataset
+
+        self.tokenizer = tokenizer
+        self.image_processor = image_processor
+        self.max_text_len = max_text_len
+        self.image_transform = image_transform
+        # 双语配比：数据含 text_en 列时，每个样本以 en_ratio 概率取英文描述。
+        # en_ratio=0 纯中文（默认，兼容旧数据），en_ratio=1 纯英文，0.5 混合。
+        self.en_ratio = float(en_ratio)
+        self.rng = random.Random(seed + (0 if split == "train" else 1))
+        # 训练文本前缀（e5 系列要求 'passage: '）
+        self.text_prefix = text_prefix or ""
+
+        ds = load_dataset("parquet", data_dir=data_dir, split="train")
+        # 划分：对 source_id 哈希取模，保证确定性与 train/val 不重叠
+        # 注意：一次性取整列（避免逐行访问触发整行/图片解码）
+        source_ids = ds["source_id"]
+        keep = [
+            i
+            for i, source_id in enumerate(source_ids)
+            if (hash_source_id(source_id, seed) % 10000 >= int(val_ratio * 10000))
+            == (split == "train")
+        ]
+        self.ds = ds.select(keep)
+        if len(self.ds) == 0:
+            raise ValueError(f"Empty '{split}' split from {data_dir} (val_ratio={val_ratio})")
+
+    def __len__(self):
+        return len(self.ds)
+
+    def __getitem__(self, idx):
+        row = self.ds[idx]
+        text = row["text"]
+        if self.en_ratio > 0.0:
+            text_en = row.get("text_en") if isinstance(row, dict) else None
+            if text_en and self.rng.random() < self.en_ratio:
+                text = text_en
+        if self.text_prefix:
+            text = self.text_prefix + text
+        img = row["image"]
+        if not isinstance(img, Image.Image):
+            import io as _io
+            img = Image.open(_io.BytesIO(img)).convert("RGB")
+
+        tok = self.tokenizer(
+            text,
+            truncation=True,
+            max_length=self.max_text_len,
+            return_attention_mask=True,
+            return_tensors="pt",
+        )
+        input_ids = tok["input_ids"].squeeze(0)
+        attention_mask = tok["attention_mask"].squeeze(0)
+
+        if self.image_transform is not None:
+            pix = self.image_transform(img)
+        elif isinstance(self.image_processor, transforms.Compose):
+            pix = self.image_processor(img)
+        else:
+            pix = self.image_processor(images=img, return_tensors="pt")["pixel_values"].squeeze(0)
+        return {"input_ids": input_ids, "attention_mask": attention_mask, "pixel_values": pix}
+
+
+def hash_source_id(source_id, seed=42):
+    """确定性哈希：不依赖 Python 内置 hash()（每次进程不同）。"""
+    import hashlib
+    digest = hashlib.md5(f"{seed}:{source_id}".encode("utf-8")).hexdigest()
+    return int(digest, 16)
+
 
 class MultimodalDataset(Dataset):
     def __init__(self, root_dir, tokenizer, image_processor, max_text_len=128, image_transform=None, key_field='data'):
         """
         samples: list of {"text": str, "image_path": str}
         tokenizer: AutoTokenizer for BGE
-        image_processor: CLIPImageProcessor for images
+            image_processor: CLIPImageProcessor or torchvision transform
         """
         self.root_dir = root_dir
         self.samples = []  # 存储 (图像路径, 标签) 的列表
@@ -58,6 +139,8 @@ class MultimodalDataset(Dataset):
         img = Image.open(img_path).convert("RGB")
         if self.image_transform is not None:
             pix = self.image_transform(img)  # should produce tensor C,H,W
+        elif isinstance(self.image_processor, transforms.Compose):
+            pix = self.image_processor(img)
         else:
             processed_image = self.image_processor(images=img, return_tensors="pt")
             pix = processed_image["pixel_values"].squeeze(0)  # [C,H,W]
@@ -77,15 +160,23 @@ def collate_fn(batch, pad_token_id):
 def main():
     TEXT_MODEL = "BAAI/bge-base-zh-v1.5"
     VISION_MODEL = "openai/clip-vit-base-patch32"
-    root_dir = "/root/research/miniembedding/data/coco128"
+    data_dir = "data/imagenet-1k-zh-captions"
     tokenizer = AutoTokenizer.from_pretrained(TEXT_MODEL, use_fast=True)
-    feature_extractor = CLIPFeatureExtractor.from_pretrained(VISION_MODEL)
-    train_dataset = MultimodalDataset(root_dir, tokenizer, feature_extractor)
-    
+    image_processor = CLIPImageProcessor.from_pretrained(VISION_MODEL)
+    train_dataset = MultimodalParquetDataset(
+        data_dir, tokenizer, image_processor, max_text_len=128, split="train", val_ratio=0.02
+    )
+    val_dataset = MultimodalParquetDataset(
+        data_dir, tokenizer, image_processor, max_text_len=128, split="val", val_ratio=0.02
+    )
+    print(f"train={len(train_dataset)}, val={len(val_dataset)}")
+
     BATCH_SIZE = 64
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
     from torch.utils.data import DataLoader
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=lambda b: collate_fn(b, pad_token_id=pad_token_id))
+    batch = next(iter(train_loader))
+    print({k: v.shape for k, v in batch.items()})
 
 if __name__ == '__main__':
     main()

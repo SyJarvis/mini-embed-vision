@@ -1,68 +1,85 @@
-import os
-from PIL import Image
-from transformers import AutoTokenizer, AutoImageProcessor, AutoModel
-import requests
+"""用 v2.2 导出权重做以文搜图：给定一段文本，对候选图片排序。"""
+import argparse
+import json
+from pathlib import Path
+
 import torch
+from PIL import Image
+from torchvision import transforms
+from transformers import AutoModel, AutoTokenizer
 
-model_dir = "./mini-embed-vision-v1.0"
 
-tokenizer = AutoTokenizer.from_pretrained(model_dir)
-image_processor = AutoImageProcessor.from_pretrained(model_dir)
-vision_model = AutoModel.from_pretrained(model_dir, trust_remote_code=True)
-vision_model.to("cuda")
+def build_timm_processor(preprocessor_path: str) -> transforms.Compose:
+    with open(preprocessor_path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    size = cfg.get("input_size", 224)
+    if isinstance(size, list):
+        size = size[-1]
+    mean = cfg.get("mean", [0.48145466, 0.4578275, 0.40821073])
+    std = cfg.get("std", [0.26862954, 0.26130258, 0.27577711])
+    interpolation = transforms.InterpolationMode[cfg.get("interpolation", "bicubic").upper()]
+    return transforms.Compose(
+        [
+            transforms.Resize(size, interpolation=interpolation),
+            transforms.CenterCrop(size),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=mean, std=std),
+        ]
+    )
 
-# 3. 准备图像（示例：COCO 猫图）
-print("正在下载示例图像...")
-url = "http://images.cocodataset.org/val2017/000000039769.jpg"  # 两只猫
-image = Image.open(requests.get(url, stream=True).raw).convert("RGB")
 
-# 预处理图像
-image_inputs = image_processor(images=image, return_tensors="pt").to("cuda")
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model-dir", default="./mini-embed-vision-v2.2")
+    parser.add_argument("--query", default="鼠标", help="查询文本")
+    parser.add_argument(
+        "--images",
+        nargs="+",
+        default=[
+            "data/person_reading.jpg",
+            "data/0001.jpg",
+            "data/0002.jpg",
+            "data/000000039769.jpg",
+            "data/黑色鼠标.jpg",
+            "data/pi07.png",
+            "data/绿色鼠标.jpg"
+        ],
+        help="候选图片路径，多个用空格分隔",
+    )
+    parser.add_argument("--query-prefix", default="query: ", help="E5 查询前缀，与 v2.2 评测一致")
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    args = parser.parse_args()
 
-# 4. 准备文本查询（模拟搜索 query）
-queries = [
-    "两只猫坐在沙发上",
-    "一只狗在草地上奔跑",
-    "可爱的猫咪",
-    "海洋中的鲸鱼",
-    "室内宠物"
-]
+    model = AutoModel.from_pretrained(args.model_dir, trust_remote_code=True, local_files_only=True)
+    model.to(args.device)
+    model.eval()
+    tokenizer = AutoTokenizer.from_pretrained(args.model_dir, trust_remote_code=True, use_fast=True, local_files_only=True)
+    image_processor = build_timm_processor(str(Path(args.model_dir) / "preprocessor_config.json"))
 
-# 5. 编码图像（得到 [1, 768] 归一化向量）
-with torch.no_grad():
-    # outputs = vision_model(pixel_values=image_inputs["pixel_values"])  # shape: [1, 768]
-    image_embedding = vision_model.encode_image(image_inputs["pixel_values"])
-    # image_embedding = outputs.image_embeds    
-print(f"图像嵌入形状: {image_embedding.shape}")
+    prefixed = (args.query_prefix or "") + args.query
+    encoded = tokenizer(prefixed, return_tensors="pt", padding=True, truncation=True, max_length=512)
+    input_ids = encoded["input_ids"].to(args.device)
+    attention_mask = encoded["attention_mask"].to(args.device)
 
-texts = queries
-# 6. 编码所有文本（得到 [N, 768] 归一化向量）
-text_embeddings = []
-for text in texts:
-    # BGE tokenizer 需要 return_tensors="pt"
-    text_inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True).to("cuda")
+    pixels = []
+    for path in args.images:
+        with Image.open(path) as img:
+            pixels.append(image_processor(img.convert("RGB")))
+    pixel_values = torch.stack(pixels).to(args.device)
 
     with torch.no_grad():
-        text_embedding = vision_model(input_ids=text_inputs["input_ids"], attention_mask=text_inputs["attention_mask"])
-        # emb = vision_model.encode_text(**text_inputs)  # [1, 768]
-    text_embeddings.append(text_embedding.last_hidden_state)
+        text_embedding = model.encode_text(input_ids, attention_mask)
+        image_embeddings = model.encode_image(pixel_values)
 
-text_embeddings = torch.cat(text_embeddings, dim=0)  # [N, 768]
-print(f"文本嵌入形状: {text_embeddings.shape}")
+    similarities = (text_embedding @ image_embeddings.T).squeeze(0).tolist()
 
-# 7. 计算余弦相似度（因已 L2 归一化，点积 = 余弦相似度）
-# image_embedding: [1, 768]
-# text_embeddings: [N, 768]
-similarities = torch.matmul(image_embedding, text_embeddings.T)  # [1, N]
-similarities = similarities.squeeze(0)  # [N]
+    print(f"查询文本: {args.query}")
+    print("以文搜图-相关性排序结果:")
+    for rank, (path, score) in enumerate(
+        sorted(zip(args.images, similarities), key=lambda item: item[1], reverse=True), 1
+    ):
+        print(f"{rank}. {path} -> 相似度: {score:.4f}")
 
-# 6. 计算余弦相似度（因已 L2 归一化，点积即余弦）
-similarities = (image_embedding @ text_embeddings.T).squeeze(0)  # [N]
 
-# 8. 输出结果（按相似度排序）
-print("以文搜图-图文检索结果（按相关性排序）:")
-results = list(zip(queries, similarities.tolist()))
-results.sort(key=lambda x: x[1], reverse=True)
-
-for i, (query, score) in enumerate(results, 1):
-    print(f"{i}. {query} → 相似度: {score:.4f}")
+if __name__ == "__main__":
+    main()

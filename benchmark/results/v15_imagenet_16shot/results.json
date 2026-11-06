@@ -1,0 +1,25 @@
+{
+  "model_name": "teamix/mini-embed-vision",
+  "model_revision": "v1.5",
+  "task_name": "Imagenet1kClassification",
+  "protocol": "5 experiments, 16-shot linear probing (LogisticRegression)",
+  "test_split": "validation",
+  "n_experiments": 5,
+  "samples_per_label": 16,
+  "n_classes": 1000,
+  "test_image_count": 50000,
+  "scores": {
+    "validation": {
+      "accuracy": 0.27067599999999997,
+      "accuracy_std": 0.002748072779240028,
+      "per_experiment": [
+        0.27148,
+        0.27424,
+        0.27198,
+        0.26966,
+        0.26602
+      ],
+      "main_score": 0.27067599999999997
+    }
+  }
+}
