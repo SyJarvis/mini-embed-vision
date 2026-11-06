@@ -10,7 +10,7 @@ from typing import Any, Iterator
 
 from tqdm.auto import tqdm
 
-from .common import JSONLRecord, append_jsonl, load_done_ids, load_dotenv, normalize_text
+from .common import JSONLRecord, append_jsonl, iter_jsonl, load_dotenv, normalize_text
 
 
 TRANSLATE_PROMPT_ZH2EN = "Translate the following Chinese image caption to English. Keep the original objective, factual style describing only visible content. Output only the translation, no explanations, no quotes, no extra text.\n\n"
@@ -162,6 +162,14 @@ def load_shards(data_dir: Path) -> list[Path]:
     return shards
 
 
+def load_translated_ids(path: Path) -> set[str]:
+    return {
+        record["source_id"]
+        for _, record in iter_jsonl(path)
+        if record.get("ok") and record.get("text_zh") and record.get("text_en") and record.get("source_id")
+    }
+
+
 def iter_unprocessed(data_dir: Path, done_ids: set[str],
                      limit: int) -> Iterator[tuple[str, str]]:
     """Yield (source_id, text) pairs, one shard at a time to avoid OOM."""
@@ -186,7 +194,7 @@ def run(args: argparse.Namespace) -> None:
     load_dotenv()
     output = args.output
     errors = args.error_output or output.with_name(output.name + ".errors.jsonl")
-    done_ids = load_done_ids(output)
+    done_ids = load_translated_ids(output)
     client = None if args.dry_run else build_client(args)
 
     # Run provenance: append/update a sidecar meta file so the model/config
